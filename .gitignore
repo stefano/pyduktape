@@ -1,2 +1,8 @@
 .env
+.eggs
 *.pyc
+build
+dist
+pyduktape.c
+pyduktape.so
+pyduktape.egg-info

@@ -2,7 +2,6 @@ from os import path
 
 from setuptools import setup, find_packages, Extension
 from codecs import open
-from Cython.Build import cythonize
 
 
 with open(path.join(path.abspath(path.dirname(__file__)), 'README'), encoding='utf-8') as readme:
@@ -36,9 +35,9 @@ setup(
         'Topic :: Software Development :: Interpreters',
     ],
 
-    packages=find_packages(),
-    install_requires=['cython'],
+    packages=find_packages(exclude=['tests']),
+    setup_requires=['setuptools>=18.0', 'Cython'],
     test_suite='tests',
 
-    ext_modules=cythonize(extensions),
+    ext_modules=extensions,
 )
