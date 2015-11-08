@@ -1,7 +1,9 @@
+import contextlib
 import json
 import select
 import socket
 import sys
+import threading
 import traceback
 
 
@@ -21,6 +23,7 @@ DUK_ENUM_OWN_PROPERTIES_ONLY = (1 << 2)
 DUK_VARARGS = -1
 
 DUK_ERR_ERROR = 100
+
 
 cdef extern from 'vendor/duktape.c':
     ctypedef struct duk_context:
@@ -42,13 +45,6 @@ cdef extern from 'vendor/duktape.c':
     ctypedef void (*duk_fatal_function) (duk_context *ctx, duk_errcode_t code, const char *msg)
     ctypedef duk_ret_t (*duk_c_function)(duk_context *ctx)
     ctypedef duk_ret_t (*duk_safe_call_function) (duk_context *ctx)
-
-    ctypedef duk_size_t (*duk_debug_read_function) (void *udata, char *buffer, duk_size_t length)
-    ctypedef duk_size_t (*duk_debug_write_function) (void *udata, const char *buffer, duk_size_t length)
-    ctypedef duk_size_t (*duk_debug_peek_function) (void *udata)
-    ctypedef void (*duk_debug_read_flush_function) (void *udata)
-    ctypedef void (*duk_debug_write_flush_function) (void *udata)
-    ctypedef void (*duk_debug_detached_function) (void *udata)
 
     cdef duk_context* duk_create_heap(duk_alloc_function alloc_func, duk_realloc_function realloc_func, duk_free_function free_func, void *heap_udata, duk_fatal_function fatal_handler)
     cdef duk_context* duk_create_heap_default()
@@ -96,50 +92,85 @@ cdef extern from 'vendor/duktape.c':
     cdef duk_bool_t duk_is_callable(duk_context *ctx, duk_idx_t index)
     cdef void duk_push_pointer(duk_context *ctx, void *p)
     cdef void *duk_get_pointer(duk_context *ctx, duk_idx_t index)
+    cdef duk_bool_t duk_is_pointer(duk_context *ctx, duk_idx_t index)
     cdef duk_int_t duk_safe_call(duk_context *ctx, duk_safe_call_function func, duk_idx_t nargs, duk_idx_t nrets)
     cdef void duk_new(duk_context *ctx, duk_idx_t nargs)
     cdef duk_int_t duk_require_int(duk_context *ctx, duk_idx_t index)
     cdef void duk_swap(duk_context *ctx, duk_idx_t index1, duk_idx_t index2)
     cdef void duk_dump_context_stdout(duk_context *ctx)
-    cdef void duk_debugger_attach(duk_context *ctx,
-                                  duk_debug_read_function read_cb,
-                                  duk_debug_write_function write_cb,
-                                  duk_debug_peek_function peek_cb,
-                                  duk_debug_read_flush_function read_flush_cb,
-                                  duk_debug_write_flush_function write_flush_cb,
-                                  duk_debug_detached_function detached_cb,
-                                  void *udata)
+    cdef void duk_set_finalizer(duk_context *ctx, duk_idx_t index)
+    cdef void *duk_get_heapptr(duk_context *ctx, duk_idx_t index)
+    cdef void duk_push_this(duk_context *ctx)
 
 
 class DuktapeError(Exception):
     pass
 
 
+class DuktapeThreadError(DuktapeError):
+    pass
+
+
+class JSError(Exception):
+    pass
+
+
 cdef class DuktapeContext(object):
     cdef duk_context *ctx
+    cdef object thread_id
+    # index into the global js stash
+    # when a js value is returned to python,
+    # a reference is kept in the global stash
+    # to avoid garbage collection
     cdef int next_ref_index
 
+    # these keep python objects referenced only by js code alive
+    cdef object registered_objects
+    cdef object registered_proxies
+    cdef object registered_proxies_reverse
+
     def __init__(self):
+        self.thread_id = threading.current_thread().ident
         self.next_ref_index = -1
+
+        self.registered_objects = {}
+        self.registered_proxies = {}
+        self.registered_proxies_reverse = {}
+
         self.ctx = duk_create_heap_default()
         if self.ctx == NULL:
             raise DuktapeError('Can\'t allocate context')
 
+        set_python_context(self.ctx, self)
+
+        self._setup_module_search_function()
+
+    cdef void _setup_module_search_function(self):
         duk_get_global_string(self.ctx, 'Duktape')
         duk_push_c_function(self.ctx, module_search, 1)
         duk_put_prop_string(self.ctx, -2, 'modSearch')
         duk_pop(self.ctx)
 
-        duk_push_global_stash(self.ctx)
-        duk_push_pointer(self.ctx, <void*>self)
-        duk_put_prop_string(self.ctx, -2, '__py_ctx')
-        duk_pop(self.ctx)
+    def _check_thread(self):
+        if threading.current_thread().ident != self.thread_id:
+            raise DuktapeThreadError()
 
     def set_globals(self, **kwargs):
+        self._check_thread()
+
         for name, value in kwargs.iteritems():
-            set_global(self.ctx, name, value)
+            self._set_global(name, value)
+
+    cdef void _set_global(self, const char *name, object value) except *:
+        to_js(self.ctx, value)
+        duk_put_global_string(self.ctx, name)
 
     def eval_js(self, src):
+        self._check_thread()
+
+        if not isinstance(src, basestring):
+            raise TypeError('Javascript source must be a string')
+
         if duk_peval_string(self.ctx, src) != 0:
             error = self.get_error()
             duk_pop(self.ctx)
@@ -150,16 +181,25 @@ cdef class DuktapeContext(object):
         duk_pop(self.ctx)
 
         if error:
-            raise DuktapeError(error)
+            raise JSError(error)
 
         return result
 
+    cdef object get_error(self):
+        if duk_get_prop_string(self.ctx, -1, 'stack') == 0:
+            error = duk_safe_to_string(self.ctx, -2)
+        else:
+            error = to_python(self, -1)
+
+        return error
+
     def make_jsref(self, duk_idx_t index):
+        self._check_thread()
+
         assert duk_is_object(self.ctx, index)
 
         self.next_ref_index += 1
 
-        # [... obj] -> [... obj stash obj] -> [... obj stash] -> [... obj]
         duk_push_global_stash(self.ctx)
         duk_dup(self.ctx, index - 1)
         duk_put_prop_index(self.ctx, -2, self.next_ref_index)
@@ -167,14 +207,57 @@ cdef class DuktapeContext(object):
 
         return JSRef(self, self.next_ref_index)
 
+    cdef void register_object(self, void *proxy_ptr, object py_obj):
+        self.registered_objects[<unsigned long>proxy_ptr] = py_obj
+
+    cdef object get_registered_object(self, void *proxy_ptr):
+        return self.registered_objects[<unsigned long>proxy_ptr]
+
+    cdef int is_registered_object(self, void *proxy_ptr):
+        return <unsigned long>proxy_ptr in self.registered_objects
+
+    cdef void unregister_object(self, void *proxy_ptr):
+        del self.registered_objects[<unsigned long>proxy_ptr]
+
+    cdef void register_proxy(self, void *proxy_ptr, void *target_ptr, object py_obj):
+        self.registered_proxies[<unsigned long>proxy_ptr] = <unsigned long>target_ptr
+        self.registered_proxies_reverse[<unsigned long>target_ptr] = <unsigned long>proxy_ptr
+        self.register_object(target_ptr, py_obj)
+
+    cdef object get_registered_object_from_proxy(self, void *proxy_ptr):
+        return self.registered_objects[self.registered_proxies[<unsigned long>proxy_ptr]]
+
+    cdef int is_registered_proxy(self, void *proxy_ptr):
+        if <unsigned long>proxy_ptr not in self.registered_proxies:
+            return 0
+
+        return self.registered_proxies[<unsigned long>proxy_ptr] in self.registered_objects
+
+    cdef void unregister_proxy_from_target(self, void *target_ptr):
+        proxy_ptr = self.registered_proxies_reverse.pop(<unsigned long>target_ptr)
+        del self.registered_objects[<unsigned long>target_ptr]
+        del self.registered_proxies[proxy_ptr]
+
     def __del__(self):
         duk_destroy_heap(self.ctx)
 
-    def get_error(self):
-        if duk_get_prop_string(self.ctx, -1, 'stack') == 0:
-           return duk_safe_to_string(self.ctx, -2)
-        else:
-            return to_python(self, -1)
+
+cdef void set_python_context(duk_context *ctx, DuktapeContext py_ctx):
+    duk_push_global_stash(ctx)
+    duk_push_pointer(ctx, <void*>py_ctx)
+    duk_put_prop_string(ctx, -2, '__py_ctx')
+    duk_pop(ctx)
+
+
+cdef DuktapeContext get_python_context(duk_context *ctx):
+    duk_push_global_stash(ctx)
+    duk_get_prop_string(ctx, -1, '__py_ctx')
+    py_ctx = <DuktapeContext>duk_get_pointer(ctx, -1)
+    duk_pop_2(ctx)
+
+    assert py_ctx.ctx is ctx
+
+    return py_ctx
 
 
 cdef class JSRef(object):
@@ -182,10 +265,14 @@ cdef class JSRef(object):
     cdef int ref_index
 
     def __init__(self, DuktapeContext py_ctx, int ref_index):
+        py_ctx._check_thread()
+
         self.py_ctx = py_ctx
         self.ref_index = ref_index
 
     def to_js(self):
+        self.py_ctx._check_thread()
+
         duk_push_global_stash(self.py_ctx.ctx)
         if duk_get_prop_index(self.py_ctx.ctx, -1, self.ref_index) == 0:
             duk_pop_2(self.py_ctx.ctx)
@@ -207,11 +294,15 @@ cdef class JSProxy(object):
     cdef JSRef __ref
     cdef JSProxy __bind_proxy
 
-    def __init__(self, ref, bind_proxy):
+    def __init__(self, JSRef ref, bind_proxy):
+        ref.py_ctx._check_thread()
+
         self.__ref = ref
         self.__bind_proxy = bind_proxy
 
     def __setattr__(self, name, value):
+        self.__ref.py_ctx._check_thread()
+
         ctx = self.__ref.py_ctx.ctx
 
         self.__ref.py_ctx.to_js()
@@ -220,6 +311,8 @@ cdef class JSProxy(object):
         duk_pop(ctx)
 
     def __getattr__(self, name):
+        self.__ref.py_ctx._check_thread()
+
         ctx = self.__ref.py_ctx.ctx
 
         self.__ref.to_js()
@@ -234,7 +327,17 @@ cdef class JSProxy(object):
 
         return res
 
+    def __getitem__(self, name):
+        self.__ref.py_ctx._check_thread()
+
+        if not isinstance(name, (int, long, basestring)):
+            raise TypeError('{} is not a valid index'.format(name))
+
+        return getattr(self, unicode(name))
+
     def __repr__(self):
+        self.__ref.py_ctx._check_thread()
+
         ctx = self.__ref.py_ctx.ctx
 
         self.__ref.to_js()
@@ -244,16 +347,21 @@ cdef class JSProxy(object):
         return '<JSProxy: {}, bind_proxy={}>'.format(res, self.__bind_proxy.__repr__())
 
     def __call__(self, *args):
+        self.__ref.py_ctx._check_thread()
+
         if self.__bind_proxy is None:
             return self.__call(duk_pcall, args, None)
         else:
             return self.__call(duk_pcall_method, args, self.__bind_proxy)
 
-    def construct(self, *args):
-        # TODO: not great...
+    def new(self, *args):
+        self.__ref.py_ctx._check_thread()
+
         return self.__call(safe_new, args, None)
 
     cdef __call(self, duk_ret_t (*call_type)(duk_context *, duk_idx_t), args, this):
+        self.__ref.py_ctx._check_thread()
+
         ctx = self.__ref.py_ctx.ctx
 
         self.__ref.to_js()
@@ -276,25 +384,66 @@ cdef class JSProxy(object):
         duk_pop(ctx)
 
         if error is not None:
-            raise DuktapeError(error)
+            raise JSError(error)
 
         return res
 
+    def __nonzero__(self):
+        self.__ref.py_ctx._check_thread()
+
+        return getattr(self, 'length', 1) > 0
+
+    def __len__(self):
+        self.__ref.py_ctx._check_thread()
+
+        return self.length
+
+    def __iter__(self):
+        self.__ref.py_ctx._check_thread()
+
+        ctx = self.__ref.py_ctx.ctx
+
+        self.__ref.to_js()
+        is_array = duk_is_array(ctx, -1)
+        is_object = duk_is_object(ctx, -1)
+
+        if is_array:
+            duk_pop(ctx)
+            for i in xrange(0, self.length):
+                yield self[i]
+        elif is_object:
+            duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY)
+
+            keys = []
+            while duk_next(ctx, -1, 0) != 0:
+                keys.append(get_python_string(ctx, -1))
+                duk_pop(ctx)
+            duk_pop_2(ctx) # pop enumerator and self.__ref
+
+            for key in keys:
+                yield key
+
     def to_js(self):
+        self.__ref.py_ctx._check_thread()
+
         self.__ref.to_js()
 
 
 cdef duk_ret_t call_new(duk_context *ctx):
+    # [ constructor arg1 arg2 ... argn nargs ]
     nargs = duk_require_int(ctx, -1)
     duk_pop(ctx)
     duk_new(ctx, nargs)
+    duk_push_undefined(ctx) # replace the popped argument
+    duk_swap(ctx, -1 , -2)
 
     return 1
 
 
 cdef duk_ret_t safe_new(duk_context *ctx, int nargs):
+    # [ constructor arg1 arg2 ... argn nargs ]
     duk_push_int(ctx, nargs)
-    return duk_safe_call(ctx, call_new, 1, 1)
+    return duk_safe_call(ctx, call_new, nargs + 2, 1)
 
 
 cdef duk_ret_t module_search(duk_context *ctx):
@@ -336,56 +485,23 @@ cdef object to_python(DuktapeContext py_ctx, duk_idx_t index, JSProxy bind_proxy
             return value
 
     if type_ == DUK_TYPE_STRING:
-        return unicode(duk_get_string(ctx, index))
+        return get_python_string(ctx, index)
 
     if type_ == DUK_TYPE_OBJECT:
-        return JSProxy(py_ctx.make_jsref(index), bind_proxy)
-
-    # if duk_is_array(ctx, index):
-    #     if duk_get_prop_string(ctx, index, 'length') == 0:
-    #         duk_pop(ctx)
-    #         return []
-
-    #     length = duk_get_int(ctx, -1)
-    #     duk_pop(ctx)
-
-    #     res = [None] * length
-    #     for i in xrange(0, length):
-    #         duk_get_prop_index(ctx, index, i)
-    #         res[i] = to_python(ctx, -1)
-    #         duk_pop(ctx)
-
-    #     return res
-
-    # if type_ == DUK_TYPE_OBJECT:
-    #     res = dict()
-
-    #     duk_enum(ctx, index, DUK_ENUM_OWN_PROPERTIES_ONLY)
-
-    #     while duk_next(ctx, -1, 1) != 0:
-    #         key = unicode(duk_get_string(ctx, -2))
-    #         value = to_python(ctx, -1)
-    #         duk_pop(ctx)
-    #         duk_pop(ctx)
-
-    #         res[key] = value
-
-    #     duk_pop(ctx)
-
-    #   return res
+        value_ptr = duk_get_heapptr(ctx, index)
+        if py_ctx.is_registered_proxy(value_ptr):
+            return py_ctx.get_registered_object_from_proxy(value_ptr)
+        else:
+            return JSProxy(py_ctx.make_jsref(index), bind_proxy)
 
     assert False
 
 
-cdef void set_global(duk_context *ctx, const char *name, object value) except *:
-    to_js(ctx, value)
-    duk_put_global_string(ctx, name)
+cdef object get_python_string(duk_context *ctx, duk_idx_t index):
+    return duk_get_string(ctx, index).decode('utf8')
 
 
 cdef void to_js(duk_context *ctx, object value) except *:
-    # TODO: this doesn't handle recurring objects correctly!
-    # it will break when the structure has cycles
-
     if value is None:
         duk_push_undefined(ctx)
         return
@@ -395,12 +511,13 @@ cdef void to_js(duk_context *ctx, object value) except *:
         return
 
     if isinstance(value, (int, long)):
-        if value >= -sys.maxint - 1 and value <= sys.maxint:
-            duk_push_int(ctx, value)
-        elif value >= (-(2 << 53) - 1) and value <= (2 << 53):
+        max_positive_js_int = 1 << 53
+        min_negative_js_int = -(1 << 53) - 1
+
+        if value >= min_negative_js_int and value <= max_positive_js_int:
             duk_push_number(ctx, float(value))
         else:
-            raise DuktapeError('Cannot convert {}, number out of range'.format(value))
+            raise OverflowError('Cannot convert {}, number out of range'.format(value))
         return
 
     if isinstance(value, float):
@@ -408,28 +525,10 @@ cdef void to_js(duk_context *ctx, object value) except *:
         return
 
     if isinstance(value, basestring):
-        duk_push_string(ctx, value)
-        return
-
-    if isinstance(value, (list, tuple)):
-        arr_idx = duk_push_array(ctx)
-        for i, item in enumerate(value):
-            to_js(ctx, item)
-            duk_put_prop_index(ctx, arr_idx, i)
-        return
-
-    if isinstance(value, dict):
-        obj_idx = duk_push_object(ctx)
-        for key, value in value.iteritems():
-            if not isinstance(key, basestring):
-                raise DuktapeError('Only strings are supported as dict keys, found {}'.format(key))
-            to_js(ctx, key)
-            to_js(ctx, value)
-            duk_put_prop(ctx, obj_idx)
+        duk_push_string(ctx, value.encode('utf8'))
         return
 
     if isinstance(value, JSProxy):
-        # assert that context is the same?
         value.to_js()
         return
 
@@ -437,49 +536,179 @@ cdef void to_js(duk_context *ctx, object value) except *:
         push_callback(ctx, value)
         return
 
-    raise DuktapeError('Don\'t know how to convert {}'.format(value))
+    push_py_proxy(ctx, value)
 
 
-callbacks = [] # this keeps all functions alive
+cdef void push_py_proxy(duk_context *ctx, object obj) except *:
+    py_ctx = get_python_context(ctx)
+
+    duk_get_global_string(ctx, 'Proxy')
+
+    duk_push_object(ctx) # proxy target
+    duk_push_c_function(ctx, py_proxy_finalizer, 1)
+    duk_set_finalizer(ctx, -2)
+    target_ptr = duk_get_heapptr(ctx, -1)
+
+    duk_push_object(ctx) # proxy options
+
+    duk_push_c_function(ctx, py_proxy_get, 3)
+    duk_put_prop_string(ctx, -2, 'get')
+
+    duk_push_c_function(ctx, py_proxy_set, 4)
+    duk_put_prop_string(ctx, -2, 'set')
+
+    duk_push_c_function(ctx, py_proxy_has, 2)
+    duk_put_prop_string(ctx, -2, 'has')
+
+    if safe_new(ctx, 2) != 0:
+        error = py_ctx.get_error()
+        duk_pop(ctx)
+        raise DuktapeError(error)
+
+    proxy_ptr = duk_get_heapptr(ctx, -1)
+    py_ctx.register_proxy(proxy_ptr, target_ptr, obj)
+
+
+cdef duk_ret_t py_proxy_finalizer(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
+
+    target_ptr = duk_get_heapptr(ctx, -1)
+    py_ctx.unregister_proxy_from_target(target_ptr)
+
+    return 0
+
+
+cdef duk_ret_t py_proxy_get(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
+    n_args = duk_get_top(ctx)
+
+    with wrap_python_exception(py_ctx):
+        target = py_ctx.get_registered_object(duk_get_heapptr(ctx, 0 - n_args))
+        key = to_python(py_ctx, 1 - n_args)
+
+        if isinstance(target, (list, tuple)):
+            # key is always a string,
+            # but we need ints to index list and tuples
+            try:
+                key = int(key)
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            value = target[key]
+        except (TypeError, IndexError, KeyError):
+            if isinstance(key, basestring):
+                value = getattr(target, key, None)
+            else:
+                value = None
+
+        to_js(ctx, value)
+
+    return 1
+
+
+cdef duk_ret_t py_proxy_has(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
+    n_args = duk_get_top(ctx)
+
+    with wrap_python_exception(py_ctx):
+        target = py_ctx.get_registered_object(duk_get_heapptr(ctx, 0 - n_args))
+        key = to_python(py_ctx, 1 - n_args)
+
+        if isinstance(target, (list, tuple)):
+            try:
+                key = int(key)
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            target[key]
+            res = True
+        except (KeyError, IndexError):
+            res = False
+        except TypeError:
+            res = hasattr(target, key)
+
+        to_js(ctx, res)
+
+    return 1
+
+
+cdef duk_ret_t py_proxy_set(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
+    n_args = duk_get_top(ctx)
+
+    with wrap_python_exception(py_ctx):
+        target = py_ctx.get_registered_object(duk_get_heapptr(ctx, 0 - n_args))
+        key = to_python(py_ctx, 1 - n_args)
+        value = to_python(py_ctx, 2 - n_args)
+
+        if isinstance(target, (list, tuple)):
+            try:
+                key = int(key)
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            target[key] = value
+        except TypeError:
+            setattr(target, key, value)
+
+    duk_push_boolean(ctx, 1)
+
+    return 1
+
+
+cdef duk_ret_t callback_finalizer(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
+    target_ptr = duk_get_heapptr(ctx, -1)
+    py_ctx.unregister_object(target_ptr)
+
+    return 0
 
 
 cdef void push_callback(duk_context *ctx, object fn) except *:
     assert callable(fn)
 
-    callbacks.append(fn)
-    python_callback_id = len(callbacks) - 1
+    py_ctx = get_python_context(ctx)
 
     duk_push_c_function(ctx, callback, DUK_VARARGS)
-    duk_push_int(ctx, python_callback_id)
-    duk_put_prop_string(ctx, -2, 'python_callback_id')
+
+    duk_push_c_function(ctx, callback_finalizer, 1)
+    duk_set_finalizer(ctx, -2)
+
+    py_ctx.register_object(duk_get_heapptr(ctx, -1), fn)
 
 
 cdef duk_ret_t callback(duk_context *ctx):
-    assert not duk_is_constructor_call(ctx)
+    if duk_is_constructor_call(ctx):
+        duk_error(ctx, DUK_ERR_ERROR, 'can\'t use new on python objects')
 
-    duk_push_global_stash(ctx)
-    duk_get_prop_string(ctx, -1, '__py_ctx')
-    py_ctx = <DuktapeContext>duk_get_pointer(ctx, -1)
-    assert py_ctx.ctx is ctx
-    duk_pop_2(ctx)
+    py_ctx = get_python_context(ctx)
 
     n_args = duk_get_top(ctx)
-    args = []
-    for i in xrange(0, n_args):
-        args.append(to_python(py_ctx, i - n_args))
 
-    duk_push_current_function(ctx)
-    duk_get_prop_string(ctx, -1, 'python_callback_id')
-    python_callback_id = duk_get_int(ctx, -1)
-    duk_pop_2(ctx)
+    with wrap_python_exception(py_ctx):
+        args = []
+        for i in xrange(0, n_args):
+            args.append(to_python(py_ctx, i - n_args))
 
+        duk_push_current_function(ctx)
+        python_callback = py_ctx.get_registered_object(duk_get_heapptr(ctx, -1))
+        duk_pop(ctx)
+
+        res = python_callback(*args)
+
+        to_js(ctx, res)
+
+    return 1
+
+
+@contextlib.contextmanager
+def wrap_python_exception(DuktapeContext py_ctx):
     try:
-        res = callbacks[python_callback_id](*args)
+        yield
     except:
         error = traceback.format_exc()
         error = error.replace('%', '%%')
-        duk_error(ctx, DUK_ERR_ERROR, error)
-
-    to_js(ctx, res)
-
-    return 1
+        duk_error(py_ctx.ctx, DUK_ERR_ERROR, error)
