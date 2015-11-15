@@ -1,3 +1,4 @@
+import os
 from threading import Thread, Lock
 
 from tests import TestCase
@@ -72,13 +73,27 @@ class TestContext(TestCase):
 
 
 class TestExternalFiles(TestCase):
+    def setUp(self):
+        self.ctx = DuktapeContext()
+        self.ctx.set_base_path(os.path.dirname(__file__))
+
     def test_eval_file(self):
-        # TODO
-        pass
+        self.ctx.eval_js_file('js/test0')
+        res = self.ctx.get_global('res')
+
+        self.assertEqual(res, 2)
+
+    def test_eval_file_with_extension(self):
+        self.ctx.eval_js_file('js/test0.js')
+        res = self.ctx.get_global('res')
+
+        self.assertEqual(res, 2)
 
     def test_require_module(self):
-        # TODO
-        pass
+        self.ctx.eval_js_file('js/test2')
+        res = self.ctx.get_global('res')
+
+        self.assertEqual(res, 3)
 
 
 class TestBasicConversion(TestCase):

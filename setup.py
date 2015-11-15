@@ -3,8 +3,8 @@ from os import path
 from setuptools import setup, find_packages, Extension
 from codecs import open
 
-
-with open(path.join(path.abspath(path.dirname(__file__)), 'README'), encoding='utf-8') as readme:
+readme_path = path.join(path.abspath(path.dirname(__file__)), 'README.rst')
+with open(readme_path, encoding='utf-8') as readme:
     long_description = readme.read()
 
 extensions = [
@@ -20,11 +20,11 @@ extensions = [
 
 setup(
     name='pyduktape',
-    version='0.0.1',
+    version='0.0.2',
     author='Stefano Dissegna',
-    description='Python interface to duktape',
+    description='Python integration for the Duktape Javascript interpreter',
     long_description=long_description,
-    url='',
+    url='https://github.com/stefano/pyduktape',
     license='GPL',
     keywords='javascript duktape embed',
     classifiers=[

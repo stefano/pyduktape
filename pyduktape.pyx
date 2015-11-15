@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import select
 import socket
 import sys
@@ -49,9 +50,10 @@ cdef extern from 'vendor/duktape.c':
     cdef duk_context* duk_create_heap(duk_alloc_function alloc_func, duk_realloc_function realloc_func, duk_free_function free_func, void *heap_udata, duk_fatal_function fatal_handler)
     cdef duk_context* duk_create_heap_default()
     cdef void duk_destroy_heap(duk_context *context)
+    cdef duk_int_t duk_peval_file(duk_context *ctx, const char *path)
     cdef duk_int_t duk_peval_string(duk_context *context, const char *source)
     cdef const char* duk_safe_to_string(duk_context *ctx, duk_idx_t index)
-    void duk_pop(duk_context *ctx)
+    cdef void duk_pop(duk_context *ctx)
 
     cdef duk_bool_t duk_get_boolean(duk_context *ctx, duk_idx_t index)
     cdef const char* duk_get_string(duk_context *ctx, duk_idx_t index)
@@ -118,6 +120,7 @@ class JSError(Exception):
 cdef class DuktapeContext(object):
     cdef duk_context *ctx
     cdef object thread_id
+    cdef object js_base_path
     # index into the global js stash
     # when a js value is returned to python,
     # a reference is kept in the global stash
@@ -131,6 +134,7 @@ cdef class DuktapeContext(object):
 
     def __init__(self):
         self.thread_id = threading.current_thread().ident
+        self.js_base_path = ''
         self.next_ref_index = -1
 
         self.registered_objects = {}
@@ -165,13 +169,55 @@ cdef class DuktapeContext(object):
         to_js(self.ctx, value)
         duk_put_global_string(self.ctx, name)
 
-    def eval_js(self, src):
-        self._check_thread()
+    def get_global(self, name):
+        if not isinstance(name, basestring):
+            raise TypeError('Global variable name must be a string, {} found'.format(type(name)))
 
+        duk_get_global_string(self.ctx, name)
+        try:
+            value = to_python(self, -1)
+        finally:
+            duk_pop(self.ctx)
+
+        return value
+
+    def set_base_path(self, path):
+        if not isinstance(path, basestring):
+            raise TypeError('Path must be a string, {} found'.format(type(path)))
+
+        self.js_base_path = path
+
+    def eval_js(self, src):
         if not isinstance(src, basestring):
             raise TypeError('Javascript source must be a string')
 
-        if duk_peval_string(self.ctx, src) != 0:
+        def eval_string():
+            return duk_peval_string(self.ctx, src)
+
+        return self._eval_js(eval_string)
+
+    def eval_js_file(self, src_path):
+        def eval_file():
+            return duk_peval_file(self.ctx, self.get_file_path(src_path))
+
+        return self._eval_js(eval_file)
+
+    def get_file_path(self, src_path):
+        if not isinstance(src_path, basestring):
+            raise TypeError('Javascript source path must be a string')
+
+        if not src_path.endswith('.js'):
+            src_path = '{}.js'.format(src_path)
+
+        if not os.path.isabs(src_path):
+            src_path = os.path.join(self.js_base_path, src_path)
+
+        return src_path
+
+    def _eval_js(self, eval_function):
+        self._check_thread()
+
+        if eval_function() != 0:
             error = self.get_error()
             duk_pop(self.ctx)
             result = None
@@ -305,7 +351,7 @@ cdef class JSProxy(object):
 
         ctx = self.__ref.py_ctx.ctx
 
-        self.__ref.py_ctx.to_js()
+        self.__ref.to_js()
         to_js(ctx, value)
         duk_put_prop_string(ctx, -2, name)
         duk_pop(ctx)
@@ -447,12 +493,13 @@ cdef duk_ret_t safe_new(duk_context *ctx, int nargs):
 
 
 cdef duk_ret_t module_search(duk_context *ctx):
+    py_ctx = get_python_context(ctx)
     module_id = duk_require_string(ctx, -1)
 
     try:
-        with open('{}.js'.format(module_id)) as module:
+        with open(py_ctx.get_file_path(module_id)) as module:
             source = module.read()
-    except IOError:
+    except:
         duk_error(ctx, DUK_ERR_ERROR, 'Could not load module: %s', module_id)
 
     duk_push_string(ctx, source)
@@ -585,22 +632,26 @@ cdef duk_ret_t py_proxy_get(duk_context *ctx):
     with wrap_python_exception(py_ctx):
         target = py_ctx.get_registered_object(duk_get_heapptr(ctx, 0 - n_args))
         key = to_python(py_ctx, 1 - n_args)
+        value = None
 
         if isinstance(target, (list, tuple)):
-            # key is always a string,
-            # but we need ints to index list and tuples
-            try:
-                key = int(key)
-            except (TypeError, ValueError):
-                pass
-
-        try:
-            value = target[key]
-        except (TypeError, IndexError, KeyError):
-            if isinstance(key, basestring):
-                value = getattr(target, key, None)
+            if key == 'length':
+                # special attribute
+                value = len(target)
             else:
-                value = None
+                # key is always a string,
+                # but we need ints to index list and tuples
+                try:
+                    key = int(key)
+                except (TypeError, ValueError):
+                    pass
+
+        if value is None:
+            try:
+                value = target[key]
+            except (TypeError, IndexError, KeyError):
+                if isinstance(key, basestring):
+                    value = getattr(target, key, None)
 
         to_js(ctx, value)
 
