@@ -1,0 +1,2 @@
+include vendor/duktape.h
+include vendor/duktape.c
