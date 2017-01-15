@@ -37147,7 +37147,7 @@ DUK_INTERNAL void duk_debug_skip_byte(duk_hthread *thr) {
  */
 
 /* Peek ahead in the stream one byte. */
-DUK_INTERNAL uint8_t duk_debug_peek_byte(duk_hthread *thr) {
+DUK_INTERNAL duk_uint8_t duk_debug_peek_byte(duk_hthread *thr) {
 	/* It is important not to call this if the last byte read was an EOM.
 	 * Reading ahead in this scenario would cause unnecessary blocking if
 	 * another message is not available.

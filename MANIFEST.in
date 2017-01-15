@@ -1,2 +1,3 @@
+include vendor/duk_config.h
 include vendor/duktape.h
 include vendor/duktape.c
