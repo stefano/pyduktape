@@ -22,7 +22,7 @@ class TestContext(TestCase):
             with ok_lock:
                 ok[0] = ok[0] and (res == 2)
 
-        threads = [Thread(target=run) for i in xrange(0, 100)]
+        threads = [Thread(target=run) for i in range(0, 100)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -360,7 +360,7 @@ class TestPyProxy(TestCase):
         self.ctx.set_globals(X=X)
         with self.assertRaises(JSError) as err:
             self.ctx.eval_js('new X()')
-        self.assertIn('can\'t use new on python objects', err.exception.message)
+        self.assertIn('can\'t use new on python objects', str(err.exception))
 
     def test_return_py_proxy_to_python(self):
         class X(object):

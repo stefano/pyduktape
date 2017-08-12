@@ -31,6 +31,7 @@ setup(
         'Development Status :: 2 - Pre-Alpha',
         'License :: OSI Approved :: GNU General Public License v2 (GPLv2)',
         'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 3',
         'Programming Language :: JavaScript',
         'Topic :: Software Development :: Interpreters',
     ],

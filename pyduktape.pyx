@@ -163,7 +163,7 @@ cdef class DuktapeContext(object):
         self._check_thread()
 
         for name, value in kwargs.iteritems():
-            self._set_global(name, value)
+            self._set_global(name.encode('utf-8'), value)
 
     cdef void _set_global(self, const char *name, object value) except *:
         to_js(self.ctx, value)
@@ -173,7 +173,7 @@ cdef class DuktapeContext(object):
         if not isinstance(name, basestring):
             raise TypeError('Global variable name must be a string, {} found'.format(type(name)))
 
-        duk_get_global_string(self.ctx, name)
+        duk_get_global_string(self.ctx, name.encode('utf-8'))
         try:
             value = to_python(self, -1)
         finally:
@@ -192,13 +192,13 @@ cdef class DuktapeContext(object):
             raise TypeError('Javascript source must be a string')
 
         def eval_string():
-            return duk_peval_string(self.ctx, src)
+            return duk_peval_string(self.ctx, src.encode('utf-8'))
 
         return self._eval_js(eval_string)
 
     def eval_js_file(self, src_path):
         def eval_file():
-            return duk_peval_file(self.ctx, self.get_file_path(src_path))
+            return duk_peval_file(self.ctx, self.get_file_path(src_path).encode('utf-8'))
 
         return self._eval_js(eval_file)
 
@@ -362,7 +362,7 @@ cdef class JSProxy(object):
         ctx = self.__ref.py_ctx.ctx
 
         self.__ref.to_js()
-        if not duk_get_prop_string(ctx, -1, name):
+        if not duk_get_prop_string(ctx, -1, name.encode('utf-8')):
             duk_pop_2(ctx)
             raise AttributeError('Attribute {} missing'.format(name))
 
@@ -497,12 +497,12 @@ cdef duk_ret_t module_search(duk_context *ctx):
     module_id = duk_require_string(ctx, -1)
 
     try:
-        with open(py_ctx.get_file_path(module_id)) as module:
+        with open(py_ctx.get_file_path(module_id.decode('utf-8'))) as module:
             source = module.read()
     except:
         duk_error(ctx, DUK_ERR_ERROR, 'Could not load module: %s', module_id)
 
-    duk_push_string(ctx, source)
+    duk_push_string(ctx, source.encode('utf-8'))
 
     return 1
 
@@ -545,7 +545,7 @@ cdef object to_python(DuktapeContext py_ctx, duk_idx_t index, JSProxy bind_proxy
 
 
 cdef object get_python_string(duk_context *ctx, duk_idx_t index):
-    return duk_get_string(ctx, index).decode('utf8')
+    return duk_get_string(ctx, index).decode('utf-8')
 
 
 cdef void to_js(duk_context *ctx, object value) except *:
@@ -572,7 +572,7 @@ cdef void to_js(duk_context *ctx, object value) except *:
         return
 
     if isinstance(value, basestring):
-        duk_push_string(ctx, value.encode('utf8'))
+        duk_push_string(ctx, value.encode('utf-8'))
         return
 
     if isinstance(value, JSProxy):
@@ -762,4 +762,4 @@ def wrap_python_exception(DuktapeContext py_ctx):
     except:
         error = traceback.format_exc()
         error = error.replace('%', '%%')
-        duk_error(py_ctx.ctx, DUK_ERR_ERROR, error)
+        duk_error(py_ctx.ctx, DUK_ERR_ERROR, error.encode('utf-8'))
