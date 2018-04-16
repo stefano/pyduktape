@@ -10,11 +10,7 @@ with open(readme_path, encoding='utf-8') as readme:
 extensions = [
     Extension(
       'pyduktape',
-      ['pyduktape.pyx'],
-      define_macros=[
-        ('DUK_OPT_DEBUGGER_SUPPORT', '1'),
-        ('DUK_OPT_INTERRUPT_COUNTER', '1'),
-      ],
+      ['pyduktape.pyx']
     )
 ]
 
