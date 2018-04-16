@@ -196,7 +196,7 @@ cdef class DuktapeContext(object):
         return self._eval_js(eval_string)
 
     def eval_js_file(self, src_path):
-        with open(src_path, 'r', encoding='utf-8') as f:
+        with open(self.get_file_path(src_path), 'r', encoding='utf-8') as f:
             code = f.read()
 
         return self.eval_js(code)
