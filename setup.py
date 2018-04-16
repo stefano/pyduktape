@@ -16,7 +16,7 @@ extensions = [
 
 setup(
     name='pyduktape',
-    version='0.0.6',
+    version='0.1.0',
     author='Stefano Dissegna',
     description='Python integration for the Duktape Javascript interpreter',
     long_description=long_description,
