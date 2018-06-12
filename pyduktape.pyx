@@ -131,7 +131,7 @@ cdef class DuktapeContext(object):
     cdef object registered_proxies
     cdef object registered_proxies_reverse
 
-    def __init__(self):
+    def __cinit__(self):
         self.thread_id = threading.current_thread().ident
         self.js_base_path = ''
         self.next_ref_index = -1
@@ -283,7 +283,7 @@ cdef class DuktapeContext(object):
         del self.registered_objects[<unsigned long>target_ptr]
         del self.registered_proxies[proxy_ptr]
 
-    def __del__(self):
+    def __dealloc__(self):
         duk_destroy_heap(self.ctx)
 
 
