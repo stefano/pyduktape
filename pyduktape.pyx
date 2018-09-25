@@ -104,6 +104,13 @@ cdef extern from 'vendor/duktape.c':
     cdef void duk_push_this(duk_context *ctx)
 
 
+cdef extern from 'vendor/duk_module_duktape.c':
+    ctypedef struct duk_context:
+        pass
+
+    cdef void duk_module_duktape_init(duk_context *ctx)
+
+
 class DuktapeError(Exception):
     pass
 
@@ -146,6 +153,7 @@ cdef class DuktapeContext(object):
 
         set_python_context(self.ctx, self)
 
+        duk_module_duktape_init(self.ctx)
         self._setup_module_search_function()
 
     cdef void _setup_module_search_function(self):
