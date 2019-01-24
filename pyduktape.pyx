@@ -228,6 +228,68 @@ cdef class DuktapeContext(object):
 
         self.py_heap = DuktapeHeap()
         self.ctx = self.py_heap.ctx
+>>>>>>> bpe/master
+
+    def delete_jsref(self, ref_index):
+        duk_push_heap_stash(self.ctx)
+        if not (duk_has_prop_index(self.ctx, -1, 2*ref_index)
+                and duk_has_prop_index(self.ctx, -1, 2*ref_index+1)):
+            duk_pop(self.ctx)
+            raise DuktapeError('Trying to delete non-existent reference')
+        duk_del_prop_index(self.ctx, -1, 2*ref_index)
+        duk_del_prop_index(self.ctx, -1, 2*ref_index+1)
+        duk_pop(self.ctx)
+
+    cdef void register_object(self, void *proxy_ptr, object py_obj):
+        self.registered_objects[<unsigned long>proxy_ptr] = py_obj
+
+    cdef object get_registered_object(self, void *proxy_ptr):
+        return self.registered_objects[<unsigned long>proxy_ptr]
+
+    cdef int is_registered_object(self, void *proxy_ptr):
+        return <unsigned long>proxy_ptr in self.registered_objects
+
+    cdef void unregister_object(self, void *proxy_ptr):
+        del self.registered_objects[<unsigned long>proxy_ptr]
+
+    cdef void register_proxy(self, void *proxy_ptr, void *target_ptr, object py_obj):
+        self.registered_proxies[<unsigned long>proxy_ptr] = <unsigned long>target_ptr
+        self.registered_proxies_reverse[<unsigned long>target_ptr] = <unsigned long>proxy_ptr
+        self.register_object(target_ptr, py_obj)
+
+    cdef object get_registered_object_from_proxy(self, void *proxy_ptr):
+        return self.registered_objects[self.registered_proxies[<unsigned long>proxy_ptr]]
+
+    cdef int is_registered_proxy(self, void *proxy_ptr):
+        if <unsigned long>proxy_ptr not in self.registered_proxies:
+            return 0
+
+        return self.registered_proxies[<unsigned long>proxy_ptr] in self.registered_objects
+
+    cdef void unregister_proxy_from_target(self, void *target_ptr):
+        proxy_ptr = self.registered_proxies_reverse.pop(<unsigned long>target_ptr)
+        del self.registered_objects[<unsigned long>target_ptr]
+        del self.registered_proxies[proxy_ptr]
+
+cdef push_jsref(duk_context *ctx, ref_index):
+    duk_push_heap_stash(ctx)
+    if duk_get_prop_index(ctx, -1, 2*ref_index) == 0:
+        duk_pop_2(ctx)
+        raise DuktapeError('Invalid reference')
+    duk_swap(ctx, -1, -2)
+    duk_pop(ctx)
+
+
+cdef class DuktapeContext(object):
+    cdef duk_context *ctx
+    cdef object js_base_path
+    cdef DuktapeHeap py_heap
+
+    def __init__(self):
+        self.js_base_path = ''
+
+        self.py_heap = DuktapeHeap()
+        self.ctx = self.py_heap.ctx
 
         duk_module_duktape_init(self.ctx)
         self._setup_module_search_function()
