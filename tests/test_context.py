@@ -30,24 +30,6 @@ class TestContext(TestCase):
 
         self.assertTrue(ok[0])
 
-    def test_cant_call_from_different_thread(self):
-        ctx = DuktapeContext()
-        proxy = ctx.eval_js('[1, 2]')
-
-        ok = [False]
-
-        def run():
-            try:
-                proxy[0]
-            except DuktapeThreadError:
-                ok[0] = True
-
-        thread = Thread(target=run)
-        thread.start()
-        thread.join()
-
-        self.assertTrue(ok[0])
-
     def test_raise_js_error(self):
         ctx = DuktapeContext()
 
