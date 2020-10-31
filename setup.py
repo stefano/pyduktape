@@ -14,6 +14,7 @@ extensions = [
       define_macros=[
         ('DUK_OPT_DEBUGGER_SUPPORT', '1'),
         ('DUK_OPT_INTERRUPT_COUNTER', '1'),
+        ('DUK_OPT_SEGFAULT_ON_PANIC', '1'),
       ],
     )
 ]
