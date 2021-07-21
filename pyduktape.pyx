@@ -50,7 +50,6 @@ cdef extern from 'vendor/duktape.c':
     cdef duk_context* duk_create_heap(duk_alloc_function alloc_func, duk_realloc_function realloc_func, duk_free_function free_func, void *heap_udata, duk_fatal_function fatal_handler)
     cdef duk_context* duk_create_heap_default()
     cdef void duk_destroy_heap(duk_context *context)
-    cdef duk_int_t duk_peval_file(duk_context *ctx, const char *path)
     cdef duk_int_t duk_peval_string(duk_context *context, const char *source)
     cdef const char* duk_safe_to_string(duk_context *ctx, duk_idx_t index)
     cdef void duk_pop(duk_context *ctx)
@@ -95,7 +94,7 @@ cdef extern from 'vendor/duktape.c':
     cdef void duk_push_pointer(duk_context *ctx, void *p)
     cdef void *duk_get_pointer(duk_context *ctx, duk_idx_t index)
     cdef duk_bool_t duk_is_pointer(duk_context *ctx, duk_idx_t index)
-    cdef duk_int_t duk_safe_call(duk_context *ctx, duk_safe_call_function func, duk_idx_t nargs, duk_idx_t nrets)
+    cdef duk_int_t duk_safe_call(duk_context *ctx, duk_safe_call_function func, void *udata, duk_idx_t nargs, duk_idx_t nrets)
     cdef void duk_new(duk_context *ctx, duk_idx_t nargs)
     cdef duk_int_t duk_require_int(duk_context *ctx, duk_idx_t index)
     cdef void duk_swap(duk_context *ctx, duk_idx_t index1, duk_idx_t index2)
@@ -103,6 +102,13 @@ cdef extern from 'vendor/duktape.c':
     cdef void duk_set_finalizer(duk_context *ctx, duk_idx_t index)
     cdef void *duk_get_heapptr(duk_context *ctx, duk_idx_t index)
     cdef void duk_push_this(duk_context *ctx)
+
+
+cdef extern from 'vendor/duk_module_duktape.c':
+    ctypedef struct duk_context:
+        pass
+
+    cdef void duk_module_duktape_init(duk_context *ctx)
 
 
 class DuktapeError(Exception):
@@ -132,7 +138,7 @@ cdef class DuktapeContext(object):
     cdef object registered_proxies
     cdef object registered_proxies_reverse
 
-    def __init__(self):
+    def __cinit__(self):
         self.thread_id = threading.current_thread().ident
         self.js_base_path = ''
         self.next_ref_index = -1
@@ -147,6 +153,7 @@ cdef class DuktapeContext(object):
 
         set_python_context(self.ctx, self)
 
+        duk_module_duktape_init(self.ctx)
         self._setup_module_search_function()
 
     cdef void _setup_module_search_function(self):
@@ -197,10 +204,10 @@ cdef class DuktapeContext(object):
         return self._eval_js(eval_string)
 
     def eval_js_file(self, src_path):
-        def eval_file():
-            return duk_peval_file(self.ctx, self.get_file_path(src_path).encode('utf-8'))
+        with open(self.get_file_path(src_path), 'r', encoding='utf-8') as f:
+            code = f.read()
 
-        return self._eval_js(eval_file)
+        return self.eval_js(code)
 
     def get_file_path(self, src_path):
         if not isinstance(src_path, basestring):
@@ -284,7 +291,7 @@ cdef class DuktapeContext(object):
         del self.registered_objects[<unsigned long>target_ptr]
         del self.registered_proxies[proxy_ptr]
 
-    def __del__(self):
+    def __dealloc__(self):
         duk_destroy_heap(self.ctx)
 
 
@@ -489,7 +496,7 @@ cdef duk_ret_t call_new(duk_context *ctx):
 cdef duk_ret_t safe_new(duk_context *ctx, int nargs):
     # [ constructor arg1 arg2 ... argn nargs ]
     duk_push_int(ctx, nargs)
-    return duk_safe_call(ctx, call_new, nargs + 2, 1)
+    return duk_safe_call(ctx, call_new, NULL, nargs + 2, 1)
 
 
 cdef duk_ret_t module_search(duk_context *ctx):
